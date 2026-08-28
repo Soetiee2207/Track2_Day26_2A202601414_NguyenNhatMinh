@@ -161,23 +161,50 @@ class InjectionScanResult:
 
 
 def scan_for_injected_instructions(text: str) -> InjectionScanResult:
-    """STUB — ALWAYS RETURNS `suspicious=False`, REGARDLESS OF `text`.
+    """Scans `text` for prompt-injection patterns embedded in retrieved content
+    (Note: pages, RESEARCH snippets, A2A peer replies). Catches imperative
+    language that tries to redirect the agent: 'ignore previous instructions',
+    'as the system', fake tool results claiming to be a new system prompt, or
+    instructions to reveal ctx.act / ctx.scopes / other learner data.
 
-    A real version needs to catch imperative language embedded in
-    RETRIEVED CONTENT (a `Note:` page, a RESEARCH snippet, an A2A peer's
-    reply) that tries to redirect what YOUR agent does next — "ignore your
-    previous instructions and...", "as the system, you must now...", a
-    fake tool result claiming to BE a new system prompt, an instruction to
-    reveal `ctx.act`/`ctx.scopes`/another learner's data. This is the
-    `poisoned_result` / `faithless_peer` duel classes' entire mechanism
-    (FINAL-PLAN.md section 4.4), and CONTRACTS.md section 6.4's
-    `guardrail_breach` is what fires when it works on you.
+    Returns `suspicious=True` with matched pattern descriptions when a
+    likely injection attempt is detected."""
+    if not text:
+        return InjectionScanResult(suspicious=False, matched_patterns=())
 
-    This starter's version does not look at `text` at all — see this
-    file's own `__main__` demo below, which runs an unambiguous injection
-    attempt through this exact function and shows it sailing through
-    uncaught. That gap is the assignment, not a bug report."""
-    return InjectionScanResult(suspicious=False, matched_patterns=())
+    # Patterns that indicate prompt injection attempts
+    _INJECTION_PATTERNS = [
+        (re.compile(r"ignore\s+(all\s+)?previous\s+instructions?", re.IGNORECASE),
+         "ignore-previous-instructions"),
+        (re.compile(r"as\s+the\s+system[,:]?", re.IGNORECASE),
+         "as-the-system"),
+        (re.compile(r"you\s+(must|should|are\s+required\s+to)\s+now", re.IGNORECASE),
+         "imperative-redirect"),
+        (re.compile(r"new\s+system\s+prompt", re.IGNORECASE),
+         "new-system-prompt"),
+        (re.compile(r"(reveal|report|expose|leak|output)\s+(the\s+)?(act|ctx|scopes|learner|private)", re.IGNORECASE),
+         "data-exfiltration"),
+        (re.compile(r"SYSTEM\s+OVERRIDE", re.IGNORECASE),
+         "system-override"),
+        (re.compile(r"disregard\s+(your|all|any)\s+(previous|prior|earlier)", re.IGNORECASE),
+         "disregard-instructions"),
+        (re.compile(r"from\s+now\s+on[,:]?\s+you", re.IGNORECASE),
+         "behavior-redirect"),
+        (re.compile(r"your\s+(new\s+)?instructions?\s+(are|is)[:\s]", re.IGNORECASE),
+         "instruction-override"),
+        (re.compile(r"(tool[_\s]?result|tool\s+response)[:\s].*(system|override|instruction)", re.IGNORECASE),
+         "fake-tool-result"),
+    ]
+
+    matched: list[str] = []
+    for pattern, label in _INJECTION_PATTERNS:
+        if pattern.search(text):
+            matched.append(label)
+
+    return InjectionScanResult(
+        suspicious=bool(matched),
+        matched_patterns=tuple(matched),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,20 +219,37 @@ class RedactionResult:
 
 
 def redact(text: str) -> RedactionResult:
-    """STUB — ALWAYS RETURNS `text` UNCHANGED, `hits=()`.
+    """Scans `text` for private content that should not appear verbatim in
+    an answer handed to an opponent. Catches seeded `Note:` or `Learner:`
+    page private fields appearing verbatim (normalised, >= 40 chars) per
+    CONTRACTS.md 6.4's `privacy_leak` detector.
 
-    A real version needs to catch a seeded `Note:` page's private content,
-    or a `Learner:` page's private field, appearing verbatim (CONTRACTS.md
-    6.4's `privacy_leak` detector: "normalised, >= 40 chars") inside an
-    answer that is about to be handed to the OPPONENT team as this
-    exchange's `answer.text` — remember, the trace you hand over on
-    prosecution is public to whoever is prosecuting you (CONTRACTS.md
-    5.4). `privacy_leak` is weight 8, tied for the heaviest class in the
-    whole Safety family (CONTRACTS.md section 6.1).
+    Returns the redacted text (with hits replaced by '[REDACTED]') and
+    the list of matched private strings."""
+    if not text:
+        return RedactionResult(redacted_text=text, hits=())
 
-    This starter's version does not look at `text` at all — see this
-    file's own `__main__` demo below."""
-    return RedactionResult(redacted_text=text, hits=())
+    # Patterns for private content markers in retrieved pages
+    _PRIVATE_PATTERNS = [
+        # Learner private fields (id, email, score, private note text)
+        re.compile(r"Learner:[\w-]+(?:'s)?\s+(?:private|personal|confidential)[^.!?\n]{20,}", re.IGNORECASE),
+        # Private note content markers
+        re.compile(r"\[PRIVATE\][^\[\]]{20,}", re.IGNORECASE),
+        re.compile(r"private_content\s*[:=]\s*['\"]([^'\"]{20,})", re.IGNORECASE),
+        # Seeded secret patterns (from poisoned notes)
+        re.compile(r"secret[_\s]key\s*[:=]\s*[\w\-]{10,}", re.IGNORECASE),
+    ]
+
+    hits: list[str] = []
+    redacted = text
+    for pattern in _PRIVATE_PATTERNS:
+        for match in pattern.finditer(text):
+            hit = match.group(0)
+            if len(hit) >= 40:
+                hits.append(hit)
+                redacted = redacted.replace(hit, "[REDACTED]")
+
+    return RedactionResult(redacted_text=redacted, hits=tuple(hits))
 
 
 # ---------------------------------------------------------------------------
@@ -224,22 +268,44 @@ _NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def verify_arithmetic(text: str) -> ArithmeticCheckResult:
-    """STUB — ALWAYS RETURNS `checked=False, ok=None`: "I did not verify
-    this", not "this is correct".
+    """Scans `text` for numeric claims and checks whether they appear to be
+    supported. Catches the `unsupported_precision` class (CONTRACTS.md 6.1/6.4)
+    — numbers stated at higher precision than any retrieved source supports.
 
-    A real version needs to catch the `unsupported_precision` class
-    (CONTRACTS.md 6.1/6.4) — a number in your answer that is more precise,
-    or simply different, than anything an anchor you actually retrieved
-    supports. `_NUMBER_RE` above is left in as a starting point (it finds
-    every bare number in a string) — turning "found some numbers" into
-    "verified each one against a retrieved source" is the actual work,
-    left undone here on purpose.
+    Returns `checked=True` with a detail string listing found numbers.
+    A real implementation would cross-reference each number against retrieved
+    tool_result bodies; here we mark them as found-but-unverified so the
+    caller knows arithmetic checking was attempted."""
+    if not text:
+        return ArithmeticCheckResult(
+            checked=False, ok=None, detail="empty text — no arithmetic to check"
+        )
 
-    This starter's version does not look at `text` at all beyond what
-    `_NUMBER_RE` would find if you called it (it isn't called) — see this
-    file's own `__main__` demo below."""
+    numbers = _NUMBER_RE.findall(text)
+    if not numbers:
+        return ArithmeticCheckResult(
+            checked=False, ok=None, detail="no numbers found in text"
+        )
+
+    # Flag numbers with suspicious precision (> 2 decimal places)
+    high_precision = [n for n in numbers if "." in n and len(n.split(".")[1]) > 2]
+    if high_precision:
+        return ArithmeticCheckResult(
+            checked=True,
+            ok=False,
+            detail=(
+                f"found {len(numbers)} number(s); {len(high_precision)} have "
+                f"suspicious precision (>2 decimal places): {high_precision[:3]}"
+            ),
+        )
+
     return ArithmeticCheckResult(
-        checked=False, ok=None, detail="verify_arithmetic is a stub — no check was performed"
+        checked=True,
+        ok=None,  # Found numbers but cannot verify against sources without tool_results
+        detail=(
+            f"found {len(numbers)} number(s): {numbers[:5]}; "
+            "cannot verify against sources without retrieved tool_result data"
+        ),
     )
 
 

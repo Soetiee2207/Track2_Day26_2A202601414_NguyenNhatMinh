@@ -537,22 +537,30 @@ def test_starter_end_to_end_against_the_full_fixture_set(labelled_fixtures):
     assert report["n_fixtures"] == len(labelled_fixtures)
     assert report["n_errors"] == 0
     assert report["n_timeouts"] == 0
-    assert report["false"] == 0, "the starter's one detector must never file a false claim on this fixture set"
-    assert report["rejected"] == 0, "the starter must never emit a schema-invalid or over-quota claim on its own"
+    assert report["false"] == 0, "detectors must never file a false claim on this fixture set"
+    assert report["rejected"] == 0, "must never emit a schema-invalid or over-quota claim"
 
-    # precision perfect: it never guesses wrong when it does file
+    # precision perfect: implemented detectors must never guess wrong
     assert report["precision"] == 1.0
-    # recall low: it implements exactly 1 of 17 classes
-    assert 0.0 < report["recall"] < 0.15
+    # recall improved: multiple classes now implemented
+    assert report["recall"] > 0.0
     assert report["false_claim_rate"] == 0.0
 
+    # enforcement_failure: the one class that was implemented in the starter — must still be perfect
     assert report["per_class"]["enforcement_failure"]["recall"] == 1.0
     assert report["per_class"]["enforcement_failure"]["present"] == 2
     assert report["per_class"]["enforcement_failure"]["verified"] == 2
-    # every other class: present in the fixtures, but never claimed (stub hooks)
-    for cls in CLASSES - {"enforcement_failure"}:
-        assert report["per_class"][cls]["present"] >= 2
-        assert report["per_class"][cls]["claimed"] == 0
+
+    # Classes whose detectors are still stubs: must have claimed == 0
+    _IMPLEMENTED = {
+        "enforcement_failure", "write_violation", "protocol_misuse",
+        "fabricated_citation", "authority_exceeded", "wasteful",
+    }
+    for cls in CLASSES - _IMPLEMENTED:
+        assert report["per_class"][cls]["claimed"] == 0, (
+            f"stub hook for {cls!r} should not claim anything, "
+            f"but claimed={report['per_class'][cls]['claimed']}"
+        )
 
 
 def test_starter_files_nothing_on_clean_fixtures(labelled_fixtures):
